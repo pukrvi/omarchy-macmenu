@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "vishnawat.macmenu",
+  "name": "Mac menu",
+  "version": "1.0.0",
+  "author": "vishnawat",
+  "description": "Apple-style menu: Launchpad app icon grid with a main-menu dock",
+  "kinds": [
+    "menu"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "menu": "MacMenu.qml"
+  }
+}
