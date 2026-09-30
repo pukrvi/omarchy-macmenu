@@ -810,9 +810,12 @@ Item {
       Rectangle {
         id: searchField
         anchors { top: parent.top; left: parent.left; right: parent.right; margins: Style.space(20) }
-        height: Style.space(42)
+        height: Style.space(40)
         radius: height / 2
-        color: Color.menu.selectedBackground
+        color: Color.menu.background
+        border.color: Color.menu.border
+        border.width: 1
+        opacity: 0.98
 
         Text {
           id: searchIcon
@@ -824,6 +827,17 @@ Item {
           anchors.left: parent.left
           anchors.leftMargin: Style.space(16)
           anchors.verticalCenter: parent.verticalCenter
+        }
+
+        Text {
+          anchors.left: search.left
+          anchors.verticalCenter: parent.verticalCenter
+          text: "Search apps and menu"
+          color: Color.menu.text
+          opacity: 0.4
+          font.family: Style.font.menuFamily
+          font.pixelSize: Style.font.body
+          visible: root.filterText.length === 0
         }
 
         TextInput {
@@ -949,18 +963,30 @@ Item {
 
                 Item {
                   width: sectionColumn.width
-                  height: headerText.height + Style.space(10)
+                  height: Style.space(30)
 
                   Text {
                     id: headerText
                     text: sectionRow.modelData.title
                     color: Color.menu.text
-                    opacity: 0.6
+                    opacity: 0.55
                     font.family: Style.font.menuFamily
-                    font.pixelSize: Style.font.body
+                    font.pixelSize: Style.font.bodySmall
                     font.capitalization: Font.AllUppercase
-                    font.letterSpacing: 0.6
-                    anchors { left: parent.left; bottom: parent.bottom }
+                    font.letterSpacing: 1.1
+                    anchors { left: parent.left; verticalCenter: parent.verticalCenter }
+                  }
+
+                  Rectangle {
+                    anchors {
+                      left: headerText.right
+                      right: parent.right
+                      leftMargin: Style.space(12)
+                      verticalCenter: headerText.verticalCenter
+                    }
+                    height: 1
+                    color: Color.menu.border
+                    opacity: 0.5
                   }
 
                   // The dock reads these to scroll to a section and to put
@@ -1006,10 +1032,35 @@ Item {
                       width: root.tileW
                       height: root.tileH
 
+                      // Staggered entrance, in reading order, capped at
+                      // ~150ms total so a long grid does not visibly take
+                      // longer to settle than a short one. Runs whenever the
+                      // card opens, which is when the grids are rebuilt.
+                      opacity: root.opened ? 1 : 0
+                      transformOrigin: Item.Center
+                      readonly property int staggerIndex: Math.min(index, 11)
+                      scale: root.opened ? 1 : 0.86
+                      Behavior on opacity {
+                        NumberAnimation {
+                          duration: 130
+                          delay: root.opened ? 30 + tile.staggerIndex * 9 : 0
+                          easing.type: Easing.OutCubic
+                        }
+                      }
+                      Behavior on scale {
+                        NumberAnimation {
+                          duration: 160
+                          delay: root.opened ? 30 + tile.staggerIndex * 9 : 0
+                          easing.type: Easing.OutCubic
+                        }
+                      }
+
                       Rectangle {
                         anchors.fill: parent
                         radius: root.appleRadius
                         color: tileMouse.containsMouse || tile.selected ? Color.menu.selectedBackground : "transparent"
+                        border.color: tile.selected ? Color.menu.selectedText : "transparent"
+                        border.width: tile.selected ? 2 : 0
                         Behavior on color { ColorAnimation { duration: 90 } }
                       }
 
