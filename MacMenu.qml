@@ -12,6 +12,7 @@ import Quickshell.Io
 import Quickshell.Wayland
 import QtQuick
 import qs.Commons
+import qs.Ui
 import "MenuModel.js" as MenuModel
 
 Item {
@@ -21,11 +22,12 @@ Item {
   property var manifest: null
   property string omarchyPath: Quickshell.env("OMARCHY_PATH")
 
-  // "" is the home grid (apps); otherwise an id of the menu tree.
-  property string activePage: ""
   property bool opened: false
   property string filterText: ""
-  property int selectedIndex: 0
+  // Index into sectionRows, the flat list of every row on the page. -1
+  // means nothing is selected, which is the resting state after a dock
+  // scroll so the keyboard starts from the section the user just jumped to.
+  property int selectedIndex: -1
   property var appRows: []
   property var items: ({})
   property var itemOrder: []
@@ -34,51 +36,98 @@ Item {
   property var iconIndex: ({})
   property var whenResults: ({})
   property var checkedResults: ({})
-  property var navStack: []
 
   readonly property int appleRadius: Math.max(Style.cornerRadius, 18)
-  readonly property real tileW: Style.space(112)
-  readonly property real tileH: Style.space(112)
+  readonly property real tileW: Style.space(104)
+  readonly property real tileH: Style.space(104)
 
-  readonly property bool homeMode: root.activePage.length === 0
   readonly property bool searchMode: root.filterText.length > 0
-  readonly property string pageTitle: root.homeMode ? "" : (root.items[root.activePage] ? (root.items[root.activePage].title || root.items[root.activePage].label) : "")
-  readonly property var pageRowList: root.pageRows()
   readonly property var searchGroups: root.searchMode ? root.filteredMenuEntries() : []
-  // Search groups produce a flat render model: folder header + its entries.
-  readonly property var searchRows: {
+  // ------------------------------------------------------------ sections
+  //
+  // One scrolling surface, not a page per folder. The card is an ordered
+  // list of sections — apps first, then one per top-level menu folder —
+  // and the dock at the bottom scrolls to a section instead of swapping
+  // the whole view. Rows still activate and launch exactly as before; the
+  // flat row list only exists so the keyboard has one index space.
+
+  // Top-level folders the dock offers, in menu order, skipping any whose
+  // guard hides every descendant.
+  readonly property var sectionItems: {
     var out = []
-    for (var g = 0; g < root.searchGroups.length; g++) {
-      out.push({ kind: "header", title: root.searchGroups[g].header })
-      for (var i = 0; i < root.searchGroups[g].items.length; i++)
-        out.push({ kind: "item", entry: root.searchGroups[g].items[i] })
+    for (var i = 0; i < root.itemOrder.length; i++) {
+      var entry = root.items[root.itemOrder[i]]
+      if (!entry || entry.id === "root") continue
+      if (entry.parent !== "root" && entry.parent !== "") continue
+      if (root.whenResults[entry.id] === false) continue
+      if (!root.hasVisibleChildren(entry.id, 0)) continue
+      out.push(entry)
     }
     return out
   }
-  readonly property var displayRows: root.searchMode
-    ? root.searchRows
-    : (root.homeMode ? root.filteredApps() : root.filteredPageRows())
-  readonly property bool searchVisible: true
 
+  // Dock model: apps and menu are scroll targets, then one per section.
   readonly property var dockItems: [
-    { icon: "", iconFont: "omarchy", label: "Home", route: "home" },
-    { icon: "󰀻", iconFont: "", label: "Apps", route: "apps" },
-    { icon: "󰥱", iconFont: "", label: "Trigger", route: "trigger" },
-    { icon: "", iconFont: "", label: "Setup", route: "setup" },
-    { icon: "", iconFont: "", label: "Style", route: "style" },
-    { icon: "󰇅", iconFont: "", label: "Learn", route: "learn" },
-    { icon: "", iconFont: "", label: "System", route: "system" }
-  ]
+    { icon: "󰄻", iconFont: "", label: "Apps", section: "apps" },
+    { icon: "", iconFont: "omarchy", label: "Menu", section: "menu" }
+  ].concat(root.sectionItems.map(function(entry) {
+    return {
+      icon: entry.icon || "󰃜",
+      iconFont: entry.iconFont || "",
+      label: entry.title || entry.label || entry.id,
+      section: entry.id
+    }
+  }))
+
+  // Flat render model for the single page. In search mode each section
+  // contributes only the rows that matched, so sections with no match drop
+  // out entirely rather than rendering an empty header.
+  readonly property var sectionRows: {
+    var out = []
+    if (!root.searchMode) {
+      var apps = root.filteredApps()
+      out.push({ kind: "header", title: "Apps", section: "apps" })
+      for (var a = 0; a < apps.length; a++) out.push({ kind: "app", app: apps[a] })
+    }
+    for (var s = 0; s < root.sectionItems.length; s++) {
+      var section = root.sectionItems[s]
+      var rows = []
+      if (root.searchMode) {
+        for (var g = 0; g < root.searchGroups.length; g++) {
+          if (root.searchGroups[g].section !== section.id) continue
+          rows = root.searchGroups[g].items
+          break
+        }
+      } else {
+        rows = root.childrenOf(section.id)
+      }
+      if (rows.length === 0) continue
+      out.push({ kind: "header", title: section.title || section.label || section.id, section: section.id })
+      for (var r = 0; r < rows.length; r++) out.push({ kind: "menu", entry: rows[r] })
+    }
+    return out
+  }
+
+  // The run of activatable rows that follows a section's header. Rows are
+  // flat in sectionRows, so a section's tiles are the entries between its
+  // header and the next header.
+  function sectionRowsFor(headerIndex) {
+    var out = []
+    for (var i = headerIndex + 1; i < root.sectionRows.length; i++) {
+      if (root.sectionRows[i].kind === "header") break
+      out.push(root.sectionRows[i])
+    }
+    return out
+  }
 
   function open(payloadJson) {
-    // The host may summon a specific page, as the first-party menu does.
+    // The host may summon a specific section, as the first-party menu does.
     // Ignoring the argument meant `shell summon vishnawat.macmenu
-    // '{"initialMenu":"system"}'` silently landed on Home.
+    // '{"initialMenu":"system"}'` silently landed at the top.
     var payload = ({})
     try { payload = JSON.parse(payloadJson || "{}") } catch (e) { payload = ({}) }
 
     root.filterText = ""
-    root.navStack = []
     root.selectedIndex = 0
     root.rebuildApps()
     root.rebuildMenu()
@@ -87,16 +136,20 @@ Item {
     // ask the shared library to resweep so they appear on first open.
     if (root.appLibrary) root.appLibrary.refreshIcons()
 
-    var initial = payload.initialMenu || payload.menu
-    root.activePage = ""
-    if (initial && initial !== "home" && initial !== "root") {
-      var entry = root.itemOf(initial)
-      if (entry && entry.kind === "link" && entry.target) entry = root.itemOf(entry.target)
-      if (entry) root.activePage = entry.id
-    }
-
     root.opened = true
-    Qt.callLater(function() { search.forceActiveFocus() })
+
+    var initial = payload.initialMenu || payload.menu
+    if (initial && initial !== "home" && initial !== "root" && initial !== "apps") {
+      // The section has to be laid out before it can be scrolled to, so
+      // this lands a turn after the surface is up.
+      Qt.callLater(function() {
+        var entry = root.itemOf(initial)
+        if (entry && entry.kind === "link" && entry.target) entry = root.itemOf(entry.target)
+        if (entry) root.scrollToSection(entry.id)
+      })
+    } else {
+      Qt.callLater(function() { search.forceActiveFocus() })
+    }
   }
 
   function close() {
@@ -118,8 +171,8 @@ Item {
     return JSON.stringify({
       appRows: root.appRows.length,
       menuItems: root.itemOrder.length,
-      activePage: root.activePage,
-      pageRows: root.pageRowList.length,
+      sections: root.sectionItems.length,
+      rows: root.sectionRows.length,
       opened: root.opened
     })
   }
@@ -127,8 +180,6 @@ Item {
   function cancel() {
     root.opened = false
     root.filterText = ""
-    root.activePage = ""
-    root.navStack = []
   }
 
   // ------------------------------------------------------------ menu tree
@@ -222,66 +273,18 @@ Item {
     return rows
   }
 
-  function pageRows() {
-    if (root.homeMode) return []
-    // A link drills into its target's children; a provider page is not
-    // enumerated natively and falls back to the classic menu on activate.
-    var entry = root.itemOf(root.activePage)
-    if (entry && entry.kind === "link" && entry.target) entry = root.itemOf(entry.target)
-    if (!entry) return []
-    return root.childrenOf(entry.id)
-  }
-
   // ------------------------------------------------------------ activation
-
-  function navPage(id, pushHistory) {
-    var entry = root.itemOf(id)
-    if (entry && entry.kind === "link" && entry.target) entry = root.itemOf(entry.target)
-    if (!entry) return
-    if (entry.provider && entry.provider !== "apps" && !(entry.action || entry.target)) {
-      root.runCommand("omarchy-menu toggle " + root.bashQuote(entry.id))
-      return
-    }
-    if (pushHistory !== false && root.activePage.length > 0) root.navStack = root.navStack.concat([root.activePage])
-    root.activePage = entry ? entry.id : ""
-    root.filterText = ""
-    root.selectedIndex = 0
-    Qt.callLater(function() { search.forceActiveFocus() })
-  }
-
-  function goHome() {
-    root.activePage = ""
-    root.navStack = []
-    root.filterText = ""
-    root.selectedIndex = 0
-    Qt.callLater(function() { search.forceActiveFocus() })
-  }
-
-  function goBack() {
-    if (root.homeMode) {
-      root.cancel()
-      return
-    }
-    var previous = root.navStack.length > 0 ? root.navStack[root.navStack.length - 1] : ""
-    if (root.navStack.length > 0) root.navStack = root.navStack.slice(0, root.navStack.length - 1)
-    root.activePage = previous
-    root.filterText = ""
-    root.selectedIndex = 0
-    Qt.callLater(function() { search.forceActiveFocus() })
-  }
 
   function runCommand(command) {
     var value = String(command || "")
     if (!value.length) return
-    root.opened = false
-    root.filterText = ""
-    root.activePage = ""
-    root.navStack = []
+    root.cancel()
     Util.execDetached(value)
   }
 
-  // A leaf action runs; a link drills into its target; a submenu opens as a
-  // page; keeper submenus of a provider fall back to the classic menu.
+  // A leaf action runs; a submenu scrolls the single page to its section; a
+  // link drills into its target; a provider page is not enumerated natively
+  // and falls back to the classic menu.
   function activateRow(entry) {
     if (!entry) return
     var id = entry.kind === "link" && entry.target ? entry.target : entry.id
@@ -294,16 +297,7 @@ Item {
       root.runCommand("omarchy-menu toggle " + root.bashQuote(resolved.id))
       return
     }
-    root.navPage(resolved.id, true)
-  }
-
-  function activateEntry(id, fallbackAction) {
-    var entry = root.itemOf(id)
-    if (fallbackAction && !entry) {
-      root.runCommand(fallbackAction)
-      return
-    }
-    root.activateRow(entry)
+    root.scrollToSection(resolved.id)
   }
 
   function bashQuote(value) {
@@ -518,18 +512,6 @@ Item {
     return out
   }
 
-  function filteredPageRows() {
-    var terms = root.filterTerms()
-    var rows = root.pageRowList
-    if (terms.length === 0) return rows
-    var out = []
-    for (var i = 0; i < rows.length; i++) {
-      var row = rows[i]
-      var haystack = (row.label + " " + row.description + " " + row.id).toLowerCase()
-      if (root.matchesAll(terms, haystack)) out.push(row)
-    }
-    return out
-  }
 
   // -------------------------------------------------- global grouped search
 
@@ -573,36 +555,35 @@ Item {
       } else {
         continue
       }
-      var folder = "Top level"
+      // Tag each hit with the top-level section it lives under, so search
+      // feeds the same single-page model as browsing instead of a separate
+      // grouped layout. The climb is bounded: a user JSONC that declares a
+      // parent cycle (A.parent="B", B.parent="A") is a valid object graph,
+      // and an unbounded walk here is an infinite loop inside the
+      // searchGroups binding — one search character would pin the shell at
+      // 100% CPU. Every other tree walk here carries the same cap
+      // (hasVisibleChildren, breadcrumbOf); this one had none.
+      var sectionId = entry.parent === "root" ? entry.id : entry.parent
       if (entry.parent !== "root") {
-        // Climb to the top-level ancestor, but bounded: a user JSONC that
-        // declares a parent cycle (A.parent="B", B.parent="A") is a valid
-        // object graph, and an unbounded walk here is an infinite loop
-        // inside the searchGroups binding — one search character would pin
-        // the shell at 100% CPU. Every other tree walk here carries the same
-        // cap (hasVisibleChildren, breadcrumbOf); this one had none.
         var ancestor = entry.parent
         var hops = 0
-        var climbed = null
         while (ancestor && hops++ < 32) {
           var step = root.itemOf(ancestor)
           if (!step) break
-          climbed = step
+          sectionId = step.id
           if (step.parent === "root" || !step.parent) break
           ancestor = step.parent
         }
-        var top = climbed
-        folder = top ? (top.title || top.label || ancestor) : "Top level"
       }
-      if (groups[folder] === undefined) {
-        groups[folder] = []
-        groupOrder.push(folder)
+      if (groups[sectionId] === undefined) {
+        groups[sectionId] = []
+        groupOrder.push(sectionId)
       }
-      groups[folder].push(entry)
+      groups[sectionId].push(entry)
     }
     var out = []
     for (var g = 0; g < groupOrder.length; g++) {
-      out.push({ header: groupOrder[g], items: groups[groupOrder[g]] })
+      out.push({ section: groupOrder[g], items: groups[groupOrder[g]] })
     }
     return out
   }
@@ -642,48 +623,116 @@ Item {
     Util.execDetached("uwsm-app -- gtk-launch " + Util.shellQuote(String(row.appId) + ".desktop"))
   }
 
-  function runDock(item) {
-    if (item.route === "apps" || item.route === "home") {
-      root.goHome()
+  // The dock scrolls the single page to a section rather than swapping the
+  // view. "apps" is the grid at the top; "menu" is the first menu section.
+  function scrollToSection(section) {
+    if (root.searchMode) return
+    var target = root.sectionAnchors[section]
+    if (target === undefined) target = 0
+    flick.contentY = Math.max(0, Math.min(target, Math.max(0, flick.contentHeight - flick.height)))
+    root.selectFirstRowIn(section)
+  }
+
+  // Section top offsets, recorded by each header as it lays out, so the
+  // dock can scroll to a y without re-walking the tree to measure it.
+  // Rebuilt as a fresh object: an in-place write into a QML `var` property
+  // is occasionally dropped, which would leave a stale anchor.
+  property var sectionAnchors: ({})
+
+  function recordSectionAnchor(section, y) {
+    var next = {}
+    for (var k in root.sectionAnchors) next[k] = root.sectionAnchors[k]
+    next[section] = y
+    root.sectionAnchors = next
+  }
+
+  function selectFirstRowIn(section) {
+    var rows = root.sectionRows
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i].section === section && rows[i].kind !== "header") {
+        root.selectedIndex = i
+        root.ensureVisible(i)
+        return
+      }
+    }
+    root.selectedIndex = -1
+  }
+
+  function activateDock(item) {
+    if (item.section === "apps") {
+      root.filterText = ""
+      flick.contentY = 0
+      root.selectFirstRowIn("apps")
       return
     }
-    root.navPage(item.route, true)
+    root.scrollToSection(item.section)
   }
 
-  onDisplayRowsChanged: {
-    if (root.selectedIndex >= root.displayRows.length)
-      root.selectedIndex = root.displayRows.length > 0 ? 0 : -1
+  onSectionRowsChanged: {
+    if (root.selectedIndex >= root.sectionRows.length)
+      root.selectedIndex = root.sectionRows.length > 0 ? 0 : -1
   }
 
+  // Activate whatever the flat row list points at.
   function launchIndex(index) {
-    if (index < 0) return
-    if (root.searchMode) {
-      var row = root.searchRows[index]
-      if (row && row.kind === "item") root.activateRow(row.entry)
-      return
-    }
-    if (index >= root.displayRows.length) return
-    if (root.homeMode) launchApp(root.displayRows[index])
-    else activateRow(root.displayRows[index])
+    if (index < 0 || index >= root.sectionRows.length) return
+    var row = root.sectionRows[index]
+    if (!row || row.kind === "header") return
+    if (row.kind === "app") launchApp(row.app)
+    else activateRow(row.entry)
+  }
+
+  // How many rows a PageUp/PageDown should move: about a screenful of the
+  // grid, in tiles rather than rows.
+  function pageStride() {
+    var perScreen = Math.max(1, Math.floor(flick.height / (tileH + Style.space(8))))
+    return perScreen * 6
+  }
+
+  function firstRowIndex() {
+    for (var i = 0; i < root.sectionRows.length; i++)
+      if (root.sectionRows[i].kind !== "header") return i
+    return -1
+  }
+
+  function lastRowIndex() {
+    for (var i = root.sectionRows.length - 1; i >= 0; i--)
+      if (root.sectionRows[i].kind !== "header") return i
+    return -1
   }
 
   function moveSelection(delta) {
-    var count = root.displayRows.length
-    if (count === 0) {
+    // Selection walks only activatable rows, skipping headers, so the
+    // keyboard does not have to arrow through section titles.
+    var rows = root.sectionRows
+    if (rows.length === 0) {
       root.selectedIndex = -1
       return
     }
-    var next = root.selectedIndex + delta
-    if (next < 0) next = count - 1
-    if (next >= count) next = 0
-    root.selectedIndex = next
+    var next = root.selectedIndex
+    for (var i = 0; i < rows.length; i++) {
+      next += delta
+      if (next < 0) next = rows.length - 1
+      if (next >= rows.length) next = 0
+      if (rows[next].kind !== "header") {
+        root.selectedIndex = next
+        return
+      }
+    }
   }
 
+  // Scrolls the selected row into view using its real position, which the
+  // tile records as it lays out. The old version computed y from a tile
+  // height and a column count, which is only right for a single flat grid
+  // — it scrolled the wrong distance as soon as rows came from a different
+  // section.
   function ensureVisible(index) {
-    var rowHeight = tileH + Style.space(8)
-    var y = Math.floor(index / itemGrid.columns) * rowHeight
+    var tile = flick.rowAt(index)
+    if (!tile) return
+    var y = flick.contentY + tile.mapToItem(flick, 0, 0).y
+    var h = tile.height
     if (y < flick.contentY) flick.contentY = y
-    else if (y + rowHeight > flick.contentY + flick.height) flick.contentY = y + rowHeight - flick.height
+    else if (y + h > flick.contentY + flick.height) flick.contentY = y + h - flick.height
   }
 
   // One listener on the shared library's change signal, which the host
@@ -700,7 +749,10 @@ Item {
 
   PanelWindow {
     id: panel
-    visible: root.opened
+    // Stay mapped for the length of the close animation instead of
+    // disappearing the instant `opened` flips, which is what made the
+    // previous build feel like a hard cut.
+    visible: root.opened || card.opacity > 0.01
     anchors { top: true; bottom: true; left: true; right: true }
     color: "transparent"
     WlrLayershell.namespace: "omarchy-macmenu"
@@ -708,9 +760,15 @@ Item {
     WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
     exclusionMode: ExclusionMode.Ignore
 
+    // The scrim fades with the card so the surface does not snap on.
     Rectangle {
+      id: scrim
       anchors.fill: parent
       color: Color.menu.scrim
+      opacity: root.opened ? 1 : 0
+      Behavior on opacity {
+        NumberAnimation { duration: 140; easing.type: Easing.OutCubic }
+      }
     }
 
     MouseArea {
@@ -718,15 +776,31 @@ Item {
       onClicked: root.cancel()
     }
 
-    Rectangle {
+    BorderSurface {
       id: card
-      width: Math.min(panel.width - Style.space(40), Style.space(1000))
-      height: Math.min(panel.height - Style.space(40), Style.space(720))
+      // 20% under the previous 1000x720 cap: the grid fits the same number
+      // of columns at a smaller tile, so the card reads denser and stops
+      // filling the screen the way it did.
+      width: Math.min(panel.width - Style.space(80), Style.space(800))
+      height: Math.min(panel.height - Style.space(80), Style.space(576))
       radius: root.appleRadius
       color: Color.menu.background
-      border.color: Color.menu.border
-      border.width: 1
+      // The shared surface spec, so the card's edge picks up the theme's
+      // border geometry instead of a flat 1px stroke that does not match.
+      borderSpec: Border.surfaceSpec("menu", "border", Color.menu.border, Math.max(1, Style.space(2)))
       anchors.centerIn: parent
+
+      // Open/close: a short scale-and-fade, fast enough to feel immediate
+      // and settle before the user starts aiming at a tile.
+      opacity: root.opened ? 1 : 0
+      scale: root.opened ? 1 : 0.94
+      transformOrigin: Item.Center
+      Behavior on opacity {
+        NumberAnimation { duration: 150; easing.type: Easing.OutCubic }
+      }
+      Behavior on scale {
+        NumberAnimation { duration: 180; easing.type: Easing.OutCubic }
+      }
 
       MouseArea {
         anchors.fill: parent
@@ -739,7 +813,6 @@ Item {
         height: Style.space(42)
         radius: height / 2
         color: Color.menu.selectedBackground
-        visible: root.searchVisible
 
         Text {
           id: searchIcon
@@ -772,12 +845,12 @@ Item {
           Keys.priority: Keys.BeforeItem
           Keys.onPressed: function(event) {
             if (event.key === Qt.Key_Escape) {
+              // First Escape clears a search, second closes. There is no
+              // page to go back to any more: the whole menu is one surface.
               if (root.filterText.length > 0) {
                 root.filterText = ""
-              } else if (root.homeMode) {
-                root.cancel()
               } else {
-                root.goBack()
+                root.cancel()
               }
               event.accepted = true
             } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
@@ -791,72 +864,30 @@ Item {
               root.moveSelection(-1)
               root.ensureVisible(root.selectedIndex)
               event.accepted = true
+            } else if (event.key === Qt.Key_PageDown) {
+              root.moveSelection(root.pageStride())
+              root.ensureVisible(root.selectedIndex)
+              event.accepted = true
+            } else if (event.key === Qt.Key_PageUp) {
+              root.moveSelection(-root.pageStride())
+              root.ensureVisible(root.selectedIndex)
+              event.accepted = true
+            } else if (event.key === Qt.Key_Home) {
+              root.selectedIndex = root.firstRowIndex()
+              root.ensureVisible(root.selectedIndex)
+              event.accepted = true
+            } else if (event.key === Qt.Key_End) {
+              root.selectedIndex = root.lastRowIndex()
+              root.ensureVisible(root.selectedIndex)
+              event.accepted = true
             }
           }
         }
       }
 
-      // Page header with a back button, only inside a menu page.
-      Item {
-        id: pageHeader
-        anchors {
-          top: searchField.bottom
-          topMargin: root.searchVisible ? Style.space(14) : Style.space(20)
-          left: parent.left
-          right: parent.right
-        }
-        height: root.homeMode ? 0 : Style.space(40)
-        visible: !root.homeMode
-
-        Rectangle {
-          id: backButton
-          width: Style.space(96)
-          height: parent.height
-          radius: 12
-          color: backMouse.containsMouse ? Color.menu.selectedBackground : "transparent"
-          anchors { left: parent.left; leftMargin: Style.space(20); verticalCenter: parent.verticalCenter }
-
-          MouseArea {
-            id: backMouse
-            anchors.fill: parent
-            hoverEnabled: true
-            onClicked: root.goBack()
-          }
-
-          Row {
-            anchors.centerIn: parent
-            spacing: Style.space(6)
-
-            Text {
-              text: "󰁯"
-              color: Color.menu.text
-              opacity: 0.75
-              font.family: Style.font.menuFamily
-              font.pixelSize: Style.font.subtitle
-              anchors.verticalCenter: parent.verticalCenter
-            }
-
-            Text {
-              text: "Back"
-              color: Color.menu.text
-              font.family: Style.font.menuFamily
-              font.pixelSize: Style.font.body
-              anchors.verticalCenter: parent.verticalCenter
-            }
-          }
-        }
-
-        Text {
-          text: root.pageTitle
-          color: Color.menu.text
-          font.family: Style.font.menuFamily
-          font.pixelSize: Style.font.heading
-          anchors.horizontalCenter: parent.horizontalCenter
-          anchors.verticalCenter: parent.verticalCenter
-          elide: Text.ElideRight
-        }
-      }
-
+      // One scrolling surface. The dock scrolls to a section instead of
+      // swapping the view, so the whole menu lives in a single column:
+      // the app grid first, then one headed grid per top-level folder.
       Flickable {
         id: flick
         anchors {
@@ -864,122 +895,171 @@ Item {
           right: parent.right
           leftMargin: Style.space(20)
           rightMargin: Style.space(20)
-          top: root.homeMode ? searchField.bottom : pageHeader.bottom
+          top: searchField.bottom
           topMargin: Style.space(14)
           bottom: divider.top
           bottomMargin: Style.space(14)
         }
         clip: true
         contentWidth: width
-        contentHeight: root.searchMode ? searchColumn.height : itemGrid.height
+        contentHeight: sectionColumn.height
         boundsBehavior: Flickable.StopAtBounds
+
+        // ensureVisible() needs the tile behind a flat row index. Collecting
+        // them as the grids lay out avoids assuming a single grid's geometry.
+        property var collectedTiles: ({})
+
+        function rowAt(index) {
+          return collectedTiles[index] !== undefined ? collectedTiles[index] : null
+        }
 
         Text {
           anchors.centerIn: parent
-          visible: root.displayRows.length === 0
-          text: root.searchMode
-            ? "No matches"
-            : root.homeMode
-              ? (root.filterText.length > 0 ? "No apps match" : "Loading apps")
-              : "Empty"
+          visible: root.sectionRows.length === 0
+          text: root.searchMode ? "No matches" : "No apps"
           color: Color.menu.text
           opacity: 0.55
           font.family: Style.font.menuFamily
           font.pixelSize: Style.font.heading
         }
 
-        // Search mode: all matching menu entries across every folder, each
-        // folder rendered as its own headed Launchpad section.
         Column {
-          id: searchColumn
-          visible: root.searchMode
+          id: sectionColumn
           width: parent.width
-          spacing: Style.space(4)
+          spacing: Style.space(18)
 
           Repeater {
-            model: root.searchGroups
+            model: root.sectionRows
 
-            Item {
-              id: searchGroup
+            // Headers and tiles share one flat index space with the
+            // keyboard, so a row's own index is what selection compares
+            // against. Headers are not activatable and moveSelection()
+            // skips them.
+            Loader {
+              id: sectionRow
               required property int index
               required property var modelData
 
-              width: parent.width
-              height: groupTitle.height + groupGrid.height + Style.space(4)
-              readonly property int columns: Math.max(3, Math.floor(width / root.tileW))
+              readonly property bool isHeader: modelData.kind === "header"
+              width: sectionColumn.width
+              sourceComponent: isHeader ? headerComponent : tileComponent
 
-              Text {
-                id: groupTitle
-                text: searchGroup.modelData.header
-                color: Color.menu.text
-                opacity: 0.6
-                font.family: Style.font.menuFamily
-                font.pixelSize: Style.font.body
-                anchors { left: parent.left; top: parent.top }
+              Component {
+                id: headerComponent
+
+                Item {
+                  width: sectionColumn.width
+                  height: headerText.height + Style.space(10)
+
+                  Text {
+                    id: headerText
+                    text: sectionRow.modelData.title
+                    color: Color.menu.text
+                    opacity: 0.6
+                    font.family: Style.font.menuFamily
+                    font.pixelSize: Style.font.body
+                    font.capitalization: Font.AllUppercase
+                    font.letterSpacing: 0.6
+                    anchors { left: parent.left; bottom: parent.bottom }
+                  }
+
+                  // The dock reads these to scroll to a section and to put
+                  // the selection on its first row.
+                  Component.onCompleted: Qt.callLater(function() {
+                    root.recordSectionAnchor(sectionRow.modelData.section, sectionRow.mapToItem(flick, 0, 0).y)
+                  })
+                }
               }
 
-              Grid {
-                id: groupGrid
-                columns: searchGroup.columns
-                spacing: Style.space(8)
-                anchors { left: parent.left; right: parent.right; top: groupTitle.bottom; topMargin: Style.space(6) }
+              Component {
+                id: tileComponent
 
-                Repeater {
-                  model: searchGroup.modelData.items
+                Grid {
+                  id: sectionGrid
+                  width: sectionColumn.width
+                  columns: Math.max(3, Math.floor(width / root.tileW))
+                  spacing: Style.space(8)
 
-                  Item {
-                    id: groupTile
-                    required property int index
-                    required property var modelData
+                  // Record this tile under its flat row index so the
+                  // keyboard can scroll to the real position rather than
+                  // recomputing one from a tile height and a column count.
+                  Component.onCompleted: Qt.callLater(function() {
+                    var next = {}
+                    for (var k in flick.collectedTiles) next[k] = flick.collectedTiles[k]
+                    next[sectionRow.index] = sectionGrid
+                    flick.collectedTiles = next
+                  })
 
-                    readonly property int flatIndex: {
-                      var n = 0
-                      for (var g = 0; g < searchGroup.index; g++) n += root.searchGroups[g].items.length + 1
-                      return n + groupTile.index + 1
-                    }
+                  Repeater {
+                    model: root.sectionRowsFor(sectionRow.index)
 
-                    width: root.tileW
-                    height: root.tileH
-                    readonly property bool isSelected: root.selectedIndex === flatIndex
+                    Item {
+                      id: tile
+                      required property int index
+                      required property var modelData
 
-                    Rectangle {
-                      anchors.fill: parent
-                      radius: 12
-                      color: groupTileMouse.containsMouse || groupTile.isSelected ? Color.menu.selectedBackground : "transparent"
-                      Behavior on color { ColorAnimation { duration: 80 } }
-                    }
+                      readonly property int flatIndex: sectionRow.index + 1 + index
+                      readonly property var menuEntry: tile.modelData.kind === "menu" ? tile.modelData.entry : null
+                      readonly property bool inMenu: menuEntry !== null
+                      readonly property bool selected: flatIndex === root.selectedIndex
 
-                    MouseArea {
-                      id: groupTileMouse
-                      anchors.fill: parent
-                      hoverEnabled: true
-                      onEntered: root.selectedIndex = groupTile.flatIndex
-                      onClicked: root.activateRow(groupTile.modelData)
-                    }
+                      width: root.tileW
+                      height: root.tileH
 
-                    Text {
-                      text: (groupTile.modelData.icon || "󰋜")
-                      color: groupTile.isSelected ? Color.menu.selectedText : Color.menu.text
-                      font.family: groupTile.modelData.iconFont.length > 0 ? groupTile.modelData.iconFont : Style.font.menuFamily
-                      font.pixelSize: Style.font.iconLarge
-                      anchors.horizontalCenter: parent.horizontalCenter
-                      anchors.top: parent.top
-                      anchors.topMargin: Style.space(14)
-                    }
+                      Rectangle {
+                        anchors.fill: parent
+                        radius: root.appleRadius
+                        color: tileMouse.containsMouse || tile.selected ? Color.menu.selectedBackground : "transparent"
+                        Behavior on color { ColorAnimation { duration: 90 } }
+                      }
 
-                    Text {
-                      text: root.rowLabel(groupTile.modelData)
-                      width: groupTile.width - Style.space(8)
-                      horizontalAlignment: Text.AlignHCenter
-                      elide: Text.ElideRight
-                      maximumLineCount: 2
-                      wrapMode: Text.WordWrap
-                      color: groupTile.isSelected ? Color.menu.selectedText : Color.menu.text
-                      font.family: Style.font.menuFamily
-                      font.pixelSize: Style.font.bodySmall
-                      anchors.horizontalCenter: parent.horizontalCenter
-                      anchors.top: parent.top
-                      anchors.topMargin: Style.space(64)
+                      MouseArea {
+                        id: tileMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        onClicked: root.launchIndex(tile.flatIndex)
+                      }
+
+                      Image {
+                        visible: !tile.inMenu
+                        width: Style.space(52)
+                        height: Style.space(52)
+                        fillMode: Image.PreserveAspectFit
+                        sourceSize.width: width * Screen.devicePixelRatio
+                        sourceSize.height: height * Screen.devicePixelRatio
+                        source: root.iconSource(tile.modelData.app.icon)
+                        asynchronous: true
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        anchors.top: parent.top
+                        anchors.topMargin: Style.space(12)
+                      }
+
+                      Text {
+                        id: glyphText
+                        visible: tile.inMenu
+                        text: tile.menuEntry.icon || "󰃜"
+                        color: tile.selected ? Color.menu.selectedText : Color.menu.text
+                        font.family: tile.inMenu && tile.menuEntry.iconFont.length > 0 ? tile.menuEntry.iconFont : Style.font.menuFamily
+                        font.pixelSize: Style.font.iconLarge
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        anchors.top: parent.top
+                        anchors.topMargin: Style.space(14)
+                      }
+
+                      Text {
+                        text: tile.inMenu ? root.rowLabel(tile.menuEntry) : tile.modelData.app.name
+                        width: tile.width - Style.space(8)
+                        horizontalAlignment: Text.AlignHCenter
+                        elide: Text.ElideRight
+                        maximumLineCount: 2
+                        wrapMode: Text.WordWrap
+                        color: tile.selected ? Color.menu.selectedText : Color.menu.text
+                        font.family: Style.font.menuFamily
+                        font.pixelSize: Style.font.bodySmall
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        anchors.top: tile.inMenu ? glyphText.bottom : parent.top
+                        anchors.topMargin: tile.inMenu ? Style.space(6) : Style.space(70)
+                      }
                     }
                   }
                 }
@@ -987,110 +1067,8 @@ Item {
             }
           }
         }
-
-        // Normal browsing: one Launchpad-style tile grid — apps and menu folders.
-        Grid {
-          id: itemGrid
-          width: parent.width
-          columns: Math.max(3, Math.floor(width / root.tileW))
-          spacing: Style.space(8)
-
-          Repeater {
-            model: root.displayRows
-
-            Item {
-              id: tile
-              required property int index
-              required property var modelData
-
-              readonly property var menuEntry: root.homeMode ? null : modelData
-              readonly property bool inMenu: menuEntry !== null && menuEntry !== undefined
-              readonly property bool isMenu: inMenu
-                ? (menuEntry.kind === "menu" || menuEntry.kind === "link")
-                  && !(menuEntry.provider && menuEntry.provider !== "apps")
-                : false
-
-              width: root.tileW
-              height: root.tileH
-              readonly property bool selected: index === root.selectedIndex
-
-              Rectangle {
-                anchors.fill: parent
-                radius: 12
-                color: tileMouse.containsMouse || tile.selected ? Color.menu.selectedBackground : "transparent"
-                Behavior on color { ColorAnimation { duration: 80 } }
-              }
-
-              MouseArea {
-                id: tileMouse
-                anchors.fill: parent
-                hoverEnabled: true
-                onEntered: root.selectedIndex = tile.index
-                onClicked: root.homeMode ? root.launchApp(tile.modelData) : root.activateRow(tile.modelData)
-              }
-
-              // Apps use desktop-entry icons; menu entries use font glyphs.
-              Image {
-                visible: root.homeMode
-                width: Style.space(52)
-                height: Style.space(52)
-                fillMode: Image.PreserveAspectFit
-                sourceSize.width: width * Screen.devicePixelRatio
-                sourceSize.height: height * Screen.devicePixelRatio
-                source: root.iconSource(tile.modelData.icon)
-                asynchronous: true
-                anchors.horizontalCenter: parent.horizontalCenter
-                anchors.top: parent.top
-                anchors.topMargin: Style.space(12)
-              }
-
-              Text {
-                id: iconGlyph
-                text: (tile.inMenu ? (tile.menuEntry.icon || "󰋜") : "")
-                visible: tile.inMenu
-                color: tile.selected ? Color.menu.selectedText : Color.menu.text
-                font.family: tile.inMenu && tile.menuEntry.iconFont.length > 0 ? tile.menuEntry.iconFont : Style.font.menuFamily
-                font.pixelSize: Style.font.iconLarge
-                anchors.horizontalCenter: parent.horizontalCenter
-                anchors.top: parent.top
-                anchors.topMargin: Style.space(14)
-              }
-
-              Text {
-                visible: root.homeMode
-                text: tile.modelData.name
-                width: tile.width - Style.space(8)
-                horizontalAlignment: Text.AlignHCenter
-                elide: Text.ElideRight
-                maximumLineCount: 2
-                wrapMode: Text.WordWrap
-                color: tile.selected ? Color.menu.selectedText : Color.menu.text
-                font.family: Style.font.menuFamily
-                font.pixelSize: Style.font.bodySmall
-                anchors.horizontalCenter: parent.horizontalCenter
-                anchors.top: parent.top
-                anchors.topMargin: Style.space(70)
-              }
-
-              Text {
-                visible: tile.inMenu
-                text: root.rowLabel(tile.menuEntry)
-                width: tile.width - Style.space(8)
-                horizontalAlignment: Text.AlignHCenter
-                elide: Text.ElideRight
-                maximumLineCount: 2
-                wrapMode: Text.WordWrap
-                color: tile.selected ? Color.menu.selectedText : Color.menu.text
-                font.family: Style.font.menuFamily
-                font.pixelSize: Style.font.bodySmall
-                anchors.horizontalCenter: parent.horizontalCenter
-                anchors.top: iconGlyph.bottom
-                anchors.topMargin: Style.space(6)
-              }
-            }
-          }
-        }
       }
+
 
       Rectangle {
         id: divider
@@ -1142,7 +1120,7 @@ Item {
               id: dockMouse
               anchors.fill: parent
               hoverEnabled: true
-              onClicked: root.runDock(dockItem.modelData)
+              onClicked: root.activateDock(dockItem.modelData)
             }
 
             Column {
@@ -1153,7 +1131,7 @@ Item {
                 text: dockItem.modelData.icon
                 anchors.horizontalCenter: parent.horizontalCenter
                 color: Color.menu.text
-                font.family: dockItem.modelData.iconFont.length > 0 ? dockItem.modelData.iconFont : Style.font.menuFamily
+                font.family: (dockItem.modelData.iconFont || "").length > 0 ? dockItem.modelData.iconFont : Style.font.menuFamily
                 font.pixelSize: Style.font.iconLarge
               }
 
