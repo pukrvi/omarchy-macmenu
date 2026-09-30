@@ -1,10 +1,20 @@
 {
   "schemaVersion": 1,
-  "id": "vishnawat.macmenu",
-  "name": "Mac menu",
+  "id": "io.github.pixdevsapps.macmenu",
+  "name": "Mac Menu",
   "version": "1.0.0",
   "author": "vishnawat",
-  "description": "Apple-style menu: Launchpad app icon grid with a main-menu dock",
+  "license": "MIT",
+  "description": "An Apple-style menu for Omarchy: one scrolling page that opens on your app grid, with every menu folder below it and a bottom dock that scrolls between them. Search covers apps and menu in one field.",
+  "homepage": "https://github.com/PixDevsApps/omarchy-macmenu",
+  "repository": "https://github.com/PixDevsApps/omarchy-macmenu",
+  "keywords": [
+    "menu",
+    "launcher",
+    "launchpad",
+    "apps",
+    "macos"
+  ],
   "kinds": [
     "menu"
   ],
