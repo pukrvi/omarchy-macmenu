@@ -12,6 +12,7 @@ import Quickshell.Io
 import Quickshell.Wayland
 import QtQuick
 import qs.Commons
+import "MenuModel.js" as MenuModel
 
 Item {
   id: root
@@ -28,10 +29,9 @@ Item {
   property var appRows: []
   property var items: ({})
   property var itemOrder: []
+  // Icon index fallback, used only when the shared AppLibrary is not
+  // injected (a preview harness); the library owns this in the real shell.
   property var iconIndex: ({})
-  property var pendingIconIndex: ({})
-  property var desktopHiddenIds: ({})
-  property var defaultHiddenIds: ({})
   property var whenResults: ({})
   property var checkedResults: ({})
   property var navStack: []
@@ -71,12 +71,30 @@ Item {
   ]
 
   function open(payloadJson) {
+    // The host may summon a specific page, as the first-party menu does.
+    // Ignoring the argument meant `shell summon vishnawat.macmenu
+    // '{"initialMenu":"system"}'` silently landed on Home.
+    var payload = ({})
+    try { payload = JSON.parse(payloadJson || "{}") } catch (e) { payload = ({}) }
+
     root.filterText = ""
-    root.activePage = ""
     root.navStack = []
+    root.selectedIndex = 0
     root.rebuildApps()
     root.rebuildMenu()
-    if (!iconIndexScan.running && Object.keys(root.iconIndex).length === 0) iconIndexScan.running = true
+
+    // Packages from the first install may only have just placed their icons;
+    // ask the shared library to resweep so they appear on first open.
+    if (root.appLibrary) root.appLibrary.refreshIcons()
+
+    var initial = payload.initialMenu || payload.menu
+    root.activePage = ""
+    if (initial && initial !== "home" && initial !== "root") {
+      var entry = root.itemOf(initial)
+      if (entry && entry.kind === "link" && entry.target) entry = root.itemOf(entry.target)
+      if (entry) root.activePage = entry.id
+    }
+
     root.opened = true
     Qt.callLater(function() { search.forceActiveFocus() })
   }
@@ -86,8 +104,9 @@ Item {
   }
 
   function refresh() {
+    defaultMenuFile.reload()
+    userMenuFile.reload()
     root.rebuildApps()
-    root.rebuildMenu()
     return "ok"
   }
 
@@ -296,31 +315,36 @@ Item {
 
   // One bash run answers every `when:`/`checked:` in both menu files; rows
   // render with the previous answers and update when the run lands.
-  readonly property string guardScriptText: {
-    var helpers =
-      'omarchy-pkg-present() { local p; for p in "$@"; do pacman -Q "$p" &>/dev/null || return 1; done; return 0; }\n' +
-      'omarchy-pkg-missing() { local p; for p in "$@"; do pacman -Q "$p" &>/dev/null && return 1; done; return 0; }\n' +
-      'omarchy-cmd-present() { local c; for c in "$@"; do command -v "$c" &>/dev/null || return 1; done; return 0; }\n' +
-      'omarchy-cmd-missing() { local c; for c in "$@"; do command -v "$c" &>/dev/null && return 1; done; return 0; }\n'
-    var guards = ""
-    var sources = [root.defaultMenuRaw, root.userMenuRaw]
-    for (var s = 0; s < sources.length; s++) {
-      var parsed
-      try {
-        parsed = JSON.parse(root.stripJsonc(sources[s]))
-      } catch (e) {
-        parsed = null
-      }
-      if (!parsed || typeof parsed !== "object") continue
-      for (var id in parsed) {
-        var value = parsed[id]
-        if (!value || typeof value !== "object" || Array.isArray(value)) continue
-        if (value.when) guards += "if { " + value.when + "; } >/dev/null 2>&1; then echo " + id + ":w:1; else echo " + id + ":w:0; fi\n"
-        if (value.checked) guards += "if { " + value.checked + "; } >/dev/null 2>&1; then echo " + id + ":c:1; else echo " + id + ":c:0; fi\n"
-      }
+  //
+  // The script comes from the shared MenuModel, which is byte-identical to
+  // the first-party menu's copy. The version this replaces built its own:
+  // that forked `pacman -Q` once per argument per guard and re-ran every
+  // `$(omarchy-default-browser)`-style reader serially inside each guard it
+  // appeared in. The shared engine answers package presence from one
+  // captured set and substitutes those readers eagerly, once per batch.
+  //
+  // A guard run that starts before the menu changes would publish answers
+  // for the old tree; defer that run rather than lose it.
+  property bool guardsPending: false
+
+  function evaluateGuards() {
+    if (guardScan.running) {
+      root.guardsPending = true
+      return
     }
-    return guards.length > 0 ? helpers + guards : ""
+    root.guardsPending = false
+
+    var script = root.guardScriptText
+    if (!script) {
+      root.whenResults = ({})
+      root.checkedResults = ({})
+      return
+    }
+    guardScan.collected = ""
+    guardScan.command = ["bash", "-lc", script]
+    guardScan.running = true
   }
+  readonly property string guardScriptText: MenuModel.guardScript(root.items)
 
   property string defaultMenuRaw: ""
   property string userMenuRaw: ""
@@ -328,6 +352,7 @@ Item {
   property string userMenuText: ""
 
   FileView {
+    id: defaultMenuFile
     path: root.omarchyPath + "/default/omarchy/omarchy-menu.jsonc"
     watchChanges: true
     printErrors: false
@@ -338,13 +363,19 @@ Item {
     }
     onFileChanged: reload()
     onLoadFailed: {
-      root.defaultMenuRaw = ""
-      root.defaultMenuText = ""
-      root.rebuildMenu()
+      // The default tree lives under /usr/share, so a transient unit-mount
+      // blip can take it away. Keep the last good copy rather than rebuild
+      // a menu that has lost every built-in row.
+      if (root.defaultMenuRaw.length === 0) {
+        root.defaultMenuRaw = ""
+        root.defaultMenuText = ""
+        root.rebuildMenu()
+      }
     }
   }
 
   FileView {
+    id: userMenuFile
     path: Quickshell.env("HOME") + "/.config/omarchy/extensions/omarchy-menu.jsonc"
     watchChanges: true
     printErrors: false
@@ -355,38 +386,57 @@ Item {
     }
     onFileChanged: reload()
     onLoadFailed: {
-      root.userMenuRaw = ""
-      root.userMenuText = ""
-      root.rebuildMenu()
+      // A user file that was never there is normal, so only the first-load
+      // failure clears it. One that was read and has since gone unreadable
+      // keeps its last good copy.
+      if (root.userMenuRaw.length === 0) {
+        root.userMenuRaw = ""
+        root.userMenuText = ""
+        root.rebuildMenu()
+      }
     }
   }
 
   Process {
     id: guardScan
-    property var splitWhen: ({})
-    property var splitChecked: ({})
-    command: ["bash", "-lc", root.guardScriptText]
+    property string collected: ""
+    command: ["bash", "-lc", ""]
     stdout: SplitParser {
-      onRead: function(line) {
-        var text = String(line || "").trim()
-        if (text.length === 0) return
-        var idEnd = text.indexOf(":")
-        var tagEnd = text.indexOf(":", idEnd + 1)
-        if (idEnd < 0 || tagEnd < 0) return
-        var id = text.slice(0, idEnd)
-        var tag = text.slice(idEnd + 1, tagEnd)
-        var value = text.slice(tagEnd + 1) === "1"
-        if (tag === "w") guardScan.splitWhen[id] = value
-        else guardScan.splitChecked[id] = value
+      onRead: function(line) { guardScan.collected += line + "\n" }
+    }
+    onExited: function(exitCode, exitStatus) {
+      // A batch that was killed rather than finished has only told us about
+      // the rows it reached, and a row whose `when:` went unanswered reads
+      // as "show". Publishing that partial set would delete rows on a
+      // transient failure, which is the opposite of what a `when:` means.
+      // Keep the last complete set instead.
+      if (exitCode !== 0 || exitStatus !== 0) {
+        if (root.guardsPending) Qt.callLater(function() { root.evaluateGuards() })
+        return
       }
-    }
-    onExited: {
-      root.whenResults = splitWhen
-      root.checkedResults = splitChecked
-    }
-    onStarted: {
-      splitWhen = ({})
-      splitChecked = ({})
+
+      var nextWhen = ({})
+      var nextChecked = ({})
+      var lines = guardScan.collected.split("\n")
+      for (var i = 0; i < lines.length; i++) {
+        var line = lines[i].trim()
+        if (!line) continue
+        var colon = line.lastIndexOf(":")
+        if (colon < 0) continue
+        var value = line.substring(colon + 1) === "1"
+        var rest = line.substring(0, colon)
+        var tagAt = rest.lastIndexOf(":")
+        if (tagAt < 0) continue
+        var id = rest.substring(0, tagAt)
+        var tag = rest.substring(tagAt + 1)
+        if (tag === "w") nextWhen[id] = value
+        else if (tag === "c") nextChecked[id] = value
+      }
+      root.whenResults = nextWhen
+      root.checkedResults = nextChecked
+      // Run the evaluation that had to stand aside, deferred a turn so the
+      // process is settled before its command is set again.
+      if (root.guardsPending) Qt.callLater(function() { root.evaluateGuards() })
     }
   }
 
@@ -400,8 +450,8 @@ Item {
 
   Timer {
     id: guardScanTimer
-    interval: 100
-    onTriggered: guardScan.running = true
+    interval: 200
+    onTriggered: root.evaluateGuards()
   }
 
   function hasCheck(entry) {
@@ -417,31 +467,28 @@ Item {
 
   // ------------------------------------------------------------ apps
 
-  function loadHides(rawText) {
-    var next = ({})
-    var lines = String(rawText || "").split(/\n/)
-    for (var i = 0; i < lines.length; i++) {
-      var id = String(lines[i] || "").trim()
-      if (id.length === 0) continue
-      if (id.slice(-8) === ".desktop") id = id.slice(0, -8)
-      next[id] = true
-    }
-    return next
-  }
+  // The application list, icon lookup and launch all belong to the shared
+  // AppLibrary the host already runs in this same process, and already
+  // injects here because the manifest declares kind "menu". The version
+  // this replaces was a line-for-line copy of it, which meant the shell ran
+  // two hidden-entry scans and two icon-index sweeps at every startup, and
+  // two more on every desktop-entry change.
+  readonly property var appLibrary: root.shell ? root.shell.appLibrary : null
 
   function rebuildApps() {
-    var values = typeof DesktopEntries !== "undefined" && DesktopEntries.applications ? (DesktopEntries.applications.values || []) : []
+    var library = root.appLibrary
+    if (!library) return
+    var values = library.sortedEntries("")
     var rows = []
     for (var i = 0; i < values.length; i++) {
       var entry = values[i]
-      if (!entry || entry.noDisplay) continue
+      if (!entry) continue
       var appId = String(entry.id || "")
       if (!appId) continue
-      if (root.desktopHiddenIds[appId] === true || root.defaultHiddenIds[appId] === true) continue
       rows.push({
         appId: appId,
-        name: String(entry.name || appId),
-        subtext: String(entry.genericName || ""),
+        name: String(library.entryName(entry) || appId),
+        subtext: String(library.entrySubtext(entry) || ""),
         icon: String(entry.icon || ""),
         keywords: entry.keywords && typeof entry.keywords.join === "function" ? entry.keywords.join(" ").toLowerCase() : ""
       })
@@ -528,11 +575,23 @@ Item {
       }
       var folder = "Top level"
       if (entry.parent !== "root") {
+        // Climb to the top-level ancestor, but bounded: a user JSONC that
+        // declares a parent cycle (A.parent="B", B.parent="A") is a valid
+        // object graph, and an unbounded walk here is an infinite loop
+        // inside the searchGroups binding — one search character would pin
+        // the shell at 100% CPU. Every other tree walk here carries the same
+        // cap (hasVisibleChildren, breadcrumbOf); this one had none.
         var ancestor = entry.parent
-        while (ancestor && root.itemOf(ancestor) && root.itemOf(ancestor).parent !== "root" && root.itemOf(ancestor).parent) {
-          ancestor = root.itemOf(ancestor).parent
+        var hops = 0
+        var climbed = null
+        while (ancestor && hops++ < 32) {
+          var step = root.itemOf(ancestor)
+          if (!step) break
+          climbed = step
+          if (step.parent === "root" || !step.parent) break
+          ancestor = step.parent
         }
-        var top = root.itemOf(ancestor)
+        var top = climbed
         folder = top ? (top.title || top.label || ancestor) : "Top level"
       }
       if (groups[folder] === undefined) {
@@ -557,6 +616,10 @@ Item {
   }
 
   function iconSource(icon) {
+    // Same ladder the shared library uses, including its preference for the
+    // context-limited app/device index: an unconstrained themed lookup can
+    // resolve an app name like "zoom" to an action icon instead.
+    if (root.appLibrary) return root.appLibrary.iconSource(icon)
     var value = String(icon || "")
     if (value.length === 0) return Quickshell.iconPath("application-x-executable", true)
     if (value.indexOf("file://") === 0 || value.indexOf("image://") === 0) return value
@@ -570,6 +633,12 @@ Item {
 
   function launchApp(row) {
     root.cancel()
+    // The library wraps this in the same scope (app-graphical.slice) and
+    // drives the launch OSD, so the icon does not vanish silently.
+    if (root.appLibrary) {
+      root.appLibrary.launch(String(row.appId), String(row.name))
+      return
+    }
     Util.execDetached("uwsm-app -- gtk-launch " + Util.shellQuote(String(row.appId) + ".desktop"))
   }
 
@@ -617,97 +686,17 @@ Item {
     else if (y + rowHeight > flick.contentY + flick.height) flick.contentY = y + rowHeight - flick.height
   }
 
-  function hiddenEntryScanCommand() {
-    var desktop = [Quickshell.env("XDG_CURRENT_DESKTOP"), Quickshell.env("XDG_SESSION_DESKTOP"), Quickshell.env("DESKTOP_SESSION")].filter(function(v) { return String(v || "").length > 0 }).join(":")
-    return Util.shellQuote(omarchyPath + "/shell/services/hidden-entries.sh") + " " + Util.shellQuote(desktop)
-  }
-
-  function iconIndexScanCommand() {
-    return [
-      'dirs="$HOME/.icons $HOME/.local/share/icons";',
-      'IFS=":"; for d in ${XDG_DATA_DIRS:-/usr/local/share:/usr/share}; do dirs="$dirs $d/icons"; done; unset IFS;',
-      'for ext in svg png; do',
-      '  for base in $dirs; do',
-      '    [[ -d $base ]] && find "$base" \\( -path "*/apps/*" -o -path "*/devices/*" \\) -name "*.$ext" 2>/dev/null;',
-      '  done;',
-      '  find /usr/share/pixmaps -maxdepth 1 -name "*.$ext" 2>/dev/null;',
-      'done'
-    ].join(' ')
-  }
-
-  function indexIconLine(path) {
-    var value = String(path || "").trim()
-    if (value.length === 0) return
-    var slash = value.lastIndexOf("/")
-    var file = slash >= 0 ? value.slice(slash + 1) : value
-    var dot = file.lastIndexOf(".")
-    var name = dot > 0 ? file.slice(0, dot) : file
-    if (name.length > 0 && root.pendingIconIndex[name] === undefined)
-      root.pendingIconIndex[name] = value
-  }
-
-  Component.onCompleted: {
-    hiddenEntryScan.running = true
-    iconIndexScan.running = true
-  }
-
+  // One listener on the shared library's change signal, which the host
+  // fires after a single rescan. The plugin previously subscribed to
+  // DesktopEntries.applications directly *as well as* running its own copy
+  // of the scan, so every desktop-entry change rebuilt the list twice and
+  // started two extra processes.
   Connections {
-    target: DesktopEntries.applications
-    function onValuesChanged() {
-      hiddenEntryScan.running = true
-      iconIndexDebounce.restart()
-      root.rebuildApps()
-    }
+    target: root.appLibrary
+    function onAppsChanged() { root.rebuildApps() }
   }
 
-  FileView {
-    path: root.omarchyPath + "/default/omarchy/launcher.hides"
-    watchChanges: true
-    printErrors: false
-    onLoaded: {
-      root.defaultHiddenIds = root.loadHides(text())
-      root.rebuildApps()
-    }
-    onFileChanged: reload()
-    onLoadFailed: {
-      root.defaultHiddenIds = ({})
-      root.rebuildApps()
-    }
-  }
-
-  QtObject {
-    id: hiddenEntryOutput
-    property string text: ""
-  }
-
-  Process {
-    id: hiddenEntryScan
-    command: ["bash", "-c", root.hiddenEntryScanCommand()]
-    stdout: SplitParser {
-      onRead: function(line) { hiddenEntryOutput.text += line + "\n" }
-    }
-    onStarted: hiddenEntryOutput.text = ""
-    onExited: {
-      root.desktopHiddenIds = root.loadHides(hiddenEntryOutput.text)
-      root.rebuildApps()
-    }
-  }
-
-  Process {
-    id: iconIndexScan
-    command: ["bash", "-c", root.iconIndexScanCommand()]
-    stdout: SplitParser {
-      onRead: function(line) { root.indexIconLine(line) }
-    }
-    onStarted: root.pendingIconIndex = ({})
-    onExited: root.iconIndex = root.pendingIconIndex
-  }
-
-  Timer {
-    id: iconIndexDebounce
-    interval: 750
-    onTriggered: if (!iconIndexScan.running) iconIndexScan.running = true
-  }
+  Component.onCompleted: root.rebuildApps()
 
   PanelWindow {
     id: panel
