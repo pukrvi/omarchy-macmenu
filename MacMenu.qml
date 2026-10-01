@@ -1090,7 +1090,7 @@ Item {
                         visible: tile.inMenu
                         text: tile.menuEntry.icon || "󰃜"
                         color: tile.selected ? Color.menu.selectedText : Color.menu.text
-                        font.family: tile.inMenu && tile.menuEntry.iconFont.length > 0 ? tile.menuEntry.iconFont : Style.font.menuFamily
+                        font.family: tile.inMenu && String(tile.menuEntry.iconFont || "").length > 0 ? tile.menuEntry.iconFont : Style.font.menuFamily
                         font.pixelSize: Style.font.iconLarge
                         anchors.horizontalCenter: parent.horizontalCenter
                         anchors.top: parent.top
