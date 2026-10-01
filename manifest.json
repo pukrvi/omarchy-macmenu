@@ -1,13 +1,13 @@
 {
   "schemaVersion": 1,
-  "id": "io.github.pixdevsapps.macmenu",
+  "id": "io.github.pukrvi.macmenu",
   "name": "Mac Menu",
   "version": "1.0.0",
   "author": "vishnawat",
   "license": "MIT",
   "description": "An Apple-style menu for Omarchy: one scrolling page that opens on your app grid, with every menu folder below it and a bottom dock that scrolls between them. Search covers apps and menu in one field.",
-  "homepage": "https://github.com/PixDevsApps/omarchy-macmenu",
-  "repository": "https://github.com/PixDevsApps/omarchy-macmenu",
+  "homepage": "https://github.com/pukrvi/omarchy-macmenu",
+  "repository": "https://github.com/pukrvi/omarchy-macmenu",
   "keywords": [
     "menu",
     "launcher",
