@@ -23,7 +23,7 @@ instead of replacing the whole view every time you open a folder.
 From the [Omarchy plugin marketplace](https://plugins.omarchy.org/), or directly:
 
 ```bash
-omarchy plugin add https://github.com/PixDevsApps/omarchy-macmenu.git --enable
+omarchy plugin add https://github.com/pukrvi/omarchy-macmenu.git --enable
 ```
 
 Requires Omarchy 4.0 (Quattro) or newer. No extra dependencies.
@@ -53,8 +53,19 @@ This plugin declares `kinds: ["menu"]`, so it replaces the menu that
 `Super`+`Space` opens. To go back to the stock menu, disable it:
 
 ```bash
-omarchy plugin disable io.github.pixdevsapps.macmenu
+omarchy plugin disable io.github.pukrvi.macmenu
 ```
+
+## Removing
+
+```bash
+omarchy plugin remove io.github.pukrvi.macmenu
+```
+
+This deletes the plugin folder and nothing else. The plugin keeps no state
+of its own — favourites, settings and the search text all live in the menu
+files you already had, and app data is read from the shell's shared
+AppLibrary — so removing it leaves nothing behind to clean up by hand.
 
 ### Bash-provider submenus
 
