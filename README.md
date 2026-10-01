@@ -53,18 +53,14 @@ This plugin declares `kinds: ["menu"]`, so it replaces the menu that
 `Super`+`Space` opens. To go back to the stock menu, disable it:
 
 ```bash
-omarchy plugin disable vishnawat.macmenu
+omarchy plugin disable io.github.pukrvi.macmenu
 ```
 
 ## Removing
 
 ```bash
-omarchy plugin remove <plugin-id>
+omarchy plugin remove io.github.pukrvi.macmenu
 ```
-
-`omarchy plugin list` shows the id your install uses. On a fresh install
-from the repository above it is `io.github.pukrvi.macmenu`; in a checkout
-cloned by hand, the folder name is the id.
 
 This deletes the plugin folder and nothing else. The plugin keeps no state
 of its own — favourites, settings and the search text all live in the menu
